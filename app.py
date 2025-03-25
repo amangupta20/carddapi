@@ -48,36 +48,26 @@ class PredictionResponse(BaseModel):
     detections: List[DetectionResult]
     class_counts: Dict[str, int]
 
-# Custom model loading function with better error handling
+# Load model function that exactly mirrors inference.py approach
 def load_model():
-    print(f"Loading model from {MODEL_PATH}...")
-    print(f"Model file exists: {os.path.exists(MODEL_PATH)}")
-    if os.path.exists(MODEL_PATH):
-        print(f"Model file size: {os.path.getsize(MODEL_PATH)} bytes")
-    else:
-        print("WARNING: Model file not found!")
-        return None, None
-    
+    print(f"Loading YOLO model from {MODEL_PATH}...")
     try:
-        # Use the Ultralytics YOLO loader that we know works from our tests
+        # Try loading with Ultralytics YOLO (works for YOLOv8+)
         from ultralytics import YOLO
         model = YOLO(MODEL_PATH)
-        print(f"SUCCESS: Model loaded with Ultralytics YOLO")
-        print(f"Model type: {type(model)}")
-        print(f"Detected classes: {model.names if hasattr(model, 'names') else 'Unknown'}")
-        return model, "ultralytics"
+        model_type = "ultralytics"
+        print("Model loaded with Ultralytics YOLO")
+        return model, model_type
     except Exception as e:
-        print(f"FAILED: Ultralytics YOLO loading - {str(e)}")
-        
-        # Try alternative methods only if ultralytics fails
+        print(f"Error loading with Ultralytics: {str(e)}")
         try:
-            # Try PyTorch Direct load with weights_only=False (which worked in your test)
-            print(f"Attempting direct PyTorch load as fallback...")
-            model = torch.load(MODEL_PATH, map_location=torch.device('cpu'), weights_only=False)
-            print(f"SUCCESS: Model loaded with PyTorch directly")
-            return model, "pytorch_direct"
+            # Fallback to PyTorch Hub (YOLOv5)
+            model = torch.hub.load('ultralytics/yolov5', 'custom', path=MODEL_PATH, force_reload=True)
+            model_type = "pytorch"
+            print("Model loaded with PyTorch Hub (YOLOv5)")
+            return model, model_type
         except Exception as e:
-            print(f"FAILED: All model loading methods failed - {str(e)}")
+            print(f"Error loading model: {e}")
             return None, None
 
 # Load model on startup
@@ -143,7 +133,6 @@ async def detect_damage(
         # Perform detection
         detections = []
         try:
-            # We know the ultralytics method works from our tests
             if model_type == "ultralytics":
                 # YOLOv11 inference with ultralytics
                 results = model(img_rgb, conf=confidence)
@@ -167,9 +156,24 @@ async def detect_damage(
                             'class_id': class_id,
                             'class_name': class_name
                         })
-            elif model_type == "pytorch_direct":
-                # Handle direct PyTorch model if needed (fallback)
-                raise HTTPException(status_code=500, detail="Direct PyTorch model inference not implemented")
+            elif model_type == "pytorch":
+                # YOLOv5 inference (using the same code as in inference.py)
+                results = model(img_rgb)
+                predictions = results.xyxy[0].cpu().numpy()
+                
+                for x1, y1, x2, y2, conf, cls_id in predictions:
+                    if conf >= confidence:
+                        try:
+                            class_name = model.names[int(cls_id)]
+                        except:
+                            class_name = f"class_{int(cls_id)}"
+                            
+                        detections.append({
+                            'box': [float(x1), float(y1), float(x2), float(y2)],
+                            'confidence': float(conf),
+                            'class_id': int(cls_id),
+                            'class_name': class_name
+                        })
             else:
                 raise ValueError(f"Unsupported model type: {model_type}")
                 
