@@ -102,15 +102,16 @@ async def detect_damage(
     file: UploadFile = File(...),
     confidence: float = Form(CONFIDENCE_THRESHOLD)
 ):
+    # Declare globals at the beginning of the function
+    global model, model_type
+    
     # Check if model is loaded
     if model is None:
         # Try loading model again
-        global model_type
         loaded_model, loaded_model_type = load_model()
         if loaded_model is None:
             raise HTTPException(status_code=500, detail="Model not loaded properly")
         else:
-            global model
             model = loaded_model
             model_type = loaded_model_type
     
