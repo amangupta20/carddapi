@@ -4,6 +4,7 @@ import cv2
 import time
 import base64
 import numpy as np
+import sys
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 from tempfile import NamedTemporaryFile
@@ -15,13 +16,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 # Constants
-MODEL_PATH = "final.pt"  # Path to your trained model
+MODEL_PATH = os.getenv("MODEL_PATH", "final.pt")  # Get from env or use default
 CONFIDENCE_THRESHOLD = 0.25  # Minimum detection confidence
 
 # Initialize FastAPI app
 app = FastAPI(
     title="Car Damage Detection API",
-    description="API for detecting car damage using YOLO model",
+    description="API for detecting car damage using YOLOv11 model",
     version="1.0.0"
 )
 
@@ -47,24 +48,41 @@ class PredictionResponse(BaseModel):
     detections: List[DetectionResult]
     class_counts: Dict[str, int]
 
-# Load model on startup
-print(f"Loading YOLO model from {MODEL_PATH}...")
-try:
-    # Try loading with Ultralytics YOLO
-    from ultralytics import YOLO
-    model = YOLO(MODEL_PATH)
-    model_type = "ultralytics"
-    print("Model loaded with Ultralytics YOLO")
-except Exception as e:
+# Custom model loading function with better error handling
+def load_model():
+    print(f"Loading model from {MODEL_PATH}...")
+    print(f"Model file exists: {os.path.exists(MODEL_PATH)}")
+    if os.path.exists(MODEL_PATH):
+        print(f"Model file size: {os.path.getsize(MODEL_PATH)} bytes")
+    else:
+        print("WARNING: Model file not found!")
+        return None, None
+    
     try:
-        # Fallback to PyTorch Hub (YOLOv5)
-        model = torch.hub.load('ultralytics/yolov5', 'custom', path=MODEL_PATH)
-        model_type = "pytorch"
-        print("Model loaded with PyTorch Hub (YOLOv5)")
+        # Use the Ultralytics YOLO loader that we know works from our tests
+        from ultralytics import YOLO
+        model = YOLO(MODEL_PATH)
+        print(f"SUCCESS: Model loaded with Ultralytics YOLO")
+        print(f"Model type: {type(model)}")
+        print(f"Detected classes: {model.names if hasattr(model, 'names') else 'Unknown'}")
+        return model, "ultralytics"
     except Exception as e:
-        print(f"Failed to load model: {e}")
-        model = None
-        model_type = None
+        print(f"FAILED: Ultralytics YOLO loading - {str(e)}")
+        
+        # Try alternative methods only if ultralytics fails
+        try:
+            # Try PyTorch Direct load with weights_only=False (which worked in your test)
+            print(f"Attempting direct PyTorch load as fallback...")
+            model = torch.load(MODEL_PATH, map_location=torch.device('cpu'), weights_only=False)
+            print(f"SUCCESS: Model loaded with PyTorch directly")
+            return model, "pytorch_direct"
+        except Exception as e:
+            print(f"FAILED: All model loading methods failed - {str(e)}")
+            return None, None
+
+# Load model on startup
+model, model_type = load_model()
+print(f"Model loaded: {model is not None}, Type: {model_type}")
 
 @app.get("/")
 async def root():
@@ -72,15 +90,29 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "model_loaded": model is not None}
+    return {
+        "status": "healthy", 
+        "model_loaded": model is not None, 
+        "model_type": model_type,
+        "classes": model.names if model is not None and hasattr(model, "names") else None
+    }
 
 @app.post("/detect", response_model=PredictionResponse)
 async def detect_damage(
     file: UploadFile = File(...),
     confidence: float = Form(CONFIDENCE_THRESHOLD)
 ):
+    # Check if model is loaded
     if model is None:
-        raise HTTPException(status_code=500, detail="Model not loaded properly")
+        # Try loading model again
+        global model_type
+        loaded_model, loaded_model_type = load_model()
+        if loaded_model is None:
+            raise HTTPException(status_code=500, detail="Model not loaded properly")
+        else:
+            global model
+            model = loaded_model
+            model_type = loaded_model_type
     
     # Validate file
     if not file.content_type.startswith("image/"):
@@ -109,47 +141,40 @@ async def detect_damage(
         
         # Perform detection
         detections = []
-        if model_type == "ultralytics":
-            # YOLOv8 inference
-            results = model(img_rgb, conf=confidence)
-            
-            # Process results
-            for result in results:
-                boxes = result.boxes
-                for box in boxes:
-                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                    confidence_score = float(box.conf[0].cpu().numpy())
-                    class_id = int(box.cls[0].cpu().numpy())
-                    
-                    try:
-                        class_name = result.names[class_id]
-                    except:
-                        class_name = f"class_{class_id}"
-                    
-                    detections.append({
-                        'box': [float(x1), float(y1), float(x2), float(y2)],
-                        'confidence': confidence_score, 
-                        'class_id': class_id,
-                        'class_name': class_name
-                    })
-                    
-        else:  # pytorch (YOLOv5)
-            # YOLOv5 inference
-            results = model(img_rgb)
-            predictions = results.xyxy[0].cpu().numpy()
-            
-            for x1, y1, x2, y2, conf, cls_id in predictions:
-                try:
-                    class_name = model.names[int(cls_id)]
-                except:
-                    class_name = f"class_{int(cls_id)}"
-                    
-                detections.append({
-                    'box': [float(x1), float(y1), float(x2), float(y2)],
-                    'confidence': float(conf),
-                    'class_id': int(cls_id),
-                    'class_name': class_name
-                })
+        try:
+            # We know the ultralytics method works from our tests
+            if model_type == "ultralytics":
+                # YOLOv11 inference with ultralytics
+                results = model(img_rgb, conf=confidence)
+                
+                # Process results
+                for result in results:
+                    boxes = result.boxes
+                    for box in boxes:
+                        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                        confidence_score = float(box.conf[0].cpu().numpy())
+                        class_id = int(box.cls[0].cpu().numpy())
+                        
+                        try:
+                            class_name = result.names[class_id]
+                        except:
+                            class_name = f"class_{class_id}"
+                        
+                        detections.append({
+                            'box': [float(x1), float(y1), float(x2), float(y2)],
+                            'confidence': confidence_score, 
+                            'class_id': class_id,
+                            'class_name': class_name
+                        })
+            elif model_type == "pytorch_direct":
+                # Handle direct PyTorch model if needed (fallback)
+                raise HTTPException(status_code=500, detail="Direct PyTorch model inference not implemented")
+            else:
+                raise ValueError(f"Unsupported model type: {model_type}")
+                
+        except Exception as e:
+            print(f"Error during inference: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Inference failed: {str(e)}")
         
         inference_time = time.time() - start_time
         
@@ -216,6 +241,7 @@ async def detect_damage(
         return response
         
     except Exception as e:
+        print(f"Error processing image: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}")
 
 if __name__ == "__main__":
