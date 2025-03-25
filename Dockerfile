@@ -6,6 +6,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     libgl1-mesa-glx \
     libglib2.0-0 \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
@@ -22,34 +23,53 @@ RUN mkdir -p /app/logs
 COPY final.pt .
 COPY app.py .
 
-# Verify model file exists and check ultralytics version
+# Verify model file exists
 RUN ls -la && \
     if [ -f "final.pt" ]; then \
         echo "Model found: $(ls -lh final.pt)"; \
     else \
         echo "WARNING: Model file NOT found!"; \
-    fi && \
-    python -c "from ultralytics import __version__ as version; print(f'Ultralytics version: {version}')"
+    fi
 
-# Test model loading with ultralytics (the method that worked in our tests)
-RUN echo 'from ultralytics import YOLO; \
-print("Testing model loading with Ultralytics..."); \
-try: \
-    model = YOLO("final.pt"); \
-    print("SUCCESS: Model loaded with Ultralytics!"); \
-    print(f"Model classes: {model.names}"); \
-except Exception as e: \
-    print(f"ERROR: {e}"); \
-' > test_ultralytics.py
+# Create a test script that exactly mirrors how inference.py loads the model
+RUN echo 'import torch\n\
+import sys\n\
+\n\
+# Set the path to your model\n\
+MODEL_PATH = "final.pt"\n\
+\n\
+# Try the exact same loading approach as in inference.py\n\
+print(f"Loading YOLO model from {MODEL_PATH}...")\n\
+try:\n\
+    # Try loading with Ultralytics YOLO\n\
+    from ultralytics import YOLO\n\
+    model = YOLO(MODEL_PATH)\n\
+    print("SUCCESS: Model loaded with Ultralytics YOLO")\n\
+except Exception as e:\n\
+    print(f"Failed with Ultralytics: {e}")\n\
+    try:\n\
+        # Fallback to PyTorch Hub (YOLOv5)\n\
+        model = torch.hub.load("ultralytics/yolov5", "custom", path=MODEL_PATH)\n\
+        print("SUCCESS: Model loaded with PyTorch Hub")\n\
+    except Exception as e:\n\
+        print(f"Failed with PyTorch Hub: {e}")\n\
+        sys.exit(1)\n\
+\n\
+print("Model loaded successfully!")\n\
+if hasattr(model, "names"):\n\
+    print(f"Classes: {model.names}")\n\
+' > test_model_loading.py
 
-# Try to load the model with our test script but don't fail if it doesn't work
-RUN python test_ultralytics.py || echo "Model test failed but continuing build..."
+# Run the model loading test
+RUN python test_model_loading.py || echo "WARNING: Model test failed but continuing build..."
 
 # Expose port
 EXPOSE 8000
 
-# Set environment variable to enable better error messages
+# Set environment variables to help with loading
 ENV PYTHONFAULTHANDLER=1
+ENV PYTHONUNBUFFERED=1
+ENV TORCH_HOME=/app/.torch
 
 # Run the application with output logged
 CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port 8000 2>&1 | tee /app/logs/app.log"] 
