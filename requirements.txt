@@ -5,5 +5,7 @@ pillow==10.0.0
 numpy==1.24.3
 opencv-python==4.8.0.76
 torch==2.0.1
-# This version of ultralytics successfully loaded the model in tests
-ultralytics==8.0.195 
+# Using the same ultralytics version as in the inference.py environment
+ultralytics>=8.0.0
+# Required for fallback method
+requests>=2.0.0 
