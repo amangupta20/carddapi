@@ -14,8 +14,8 @@ A FastAPI application for car damage detection using a YOLO-based model.
 1. Clone this repository:
 
    ```
-   git clone https://github.com/yourusername/cardamaged.git
-   cd cardamaged
+   git clone https://github.com/amangupta20/carddapi.git
+   cd carddapi
    ```
 
 2. Create a virtual environment and activate it:
